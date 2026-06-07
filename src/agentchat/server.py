@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -14,6 +12,7 @@ from pydantic import BaseModel
 
 from fastmcp import Context, FastMCP
 
+from .bootstrap import resolve_bootstrap_path, write_bootstrap_payload
 from .store import Agent, Project, Store
 
 
@@ -60,14 +59,11 @@ def _session_key(ctx: Context) -> str:
 
 
 def bootstrap_path(project: Project, agent_name: str) -> Path:
-    return Path(project.project_key) / ".codex" / "agentchat" / f"{agent_name}.json"
+    return resolve_bootstrap_path(project.project_key, agent_name)
 
 
 def write_bootstrap(project: Project, agent: Agent, settings: Settings) -> str:
     path = bootstrap_path(project, agent.agent_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with suppress(OSError):
-        os.chmod(path.parent, 0o700)
     payload = {
         "project_key": project.project_key,
         "project_slug": project.project_slug,
@@ -76,10 +72,7 @@ def write_bootstrap(project: Project, agent: Agent, settings: Settings) -> str:
         "registration_token": agent.registration_token,
         "server_url": settings.server_url,
     }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    with suppress(OSError):
-        os.chmod(path, 0o600)
-    return str(path)
+    return str(write_bootstrap_payload(path, payload))
 
 
 def build_mcp_server(settings: Settings, store: Store | None = None) -> FastMCP:
@@ -166,9 +159,38 @@ def build_mcp_server(settings: Settings, store: Store | None = None) -> FastMCP:
         registration_token: str | None = None,
     ) -> dict[str, Any]:
         project = ensure_project(project_key)
-        agent = state.register_agent(project, agent_name, program, model, _session_key(ctx), registration_token)
+        session_id = _session_key(ctx)
+        previous_agent = state.get_agent(project.id, agent_name)
+        if previous_agent is None:
+            agent = state.create_agent(
+                project,
+                agent_name,
+                program,
+                model,
+                session_id,
+                registration_token,
+            )
+        else:
+            previous_agent, agent = state.refresh_agent_registration(
+                project,
+                agent_name,
+                program,
+                model,
+                session_id,
+                registration_token,
+            )
+        try:
+            bootstrap = write_bootstrap(project, agent, settings)
+        except Exception:
+            # This recovers ordinary write failures, but it is not a full transaction across
+            # SQLite and the filesystem. A process crash after the DB update but before the
+            # bootstrap replace can still leave the rotated token without a durable artifact.
+            if previous_agent is None:
+                state.delete_agent(agent.id)
+            else:
+                state.restore_agent(previous_agent)
+            raise
         bind_session(ctx, project, agent)
-        bootstrap = write_bootstrap(project, agent, settings)
         return {
             "agent_id": agent.id,
             "agent_name": agent.agent_name,

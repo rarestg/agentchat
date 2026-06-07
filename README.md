@@ -87,8 +87,10 @@ In practice, Codex should call `agentchat_register` with:
 Success checkpoint:
 
 - the tool result should include `bootstrap_path`
-- that file should now exist at `.codex/agentchat/<agent_name>.json`
-- that bootstrap file should stay ignored in the repo you are coordinating on
+- that file should now exist in per-user local state, by default
+  `${XDG_STATE_HOME:-~/.local/state}/agentchat/bootstrap/<project-hash>/<agent_name>.json`
+- `agentchat bootstrap-path /path/to/repo <agent_name>` prints the exact location for that repo/agent pair
+- relative `XDG_STATE_HOME` is ignored; set it to an absolute path or leave it unset
 
 If the current directory is inside a Git repo, `agentchat` uses the Git top-level as the canonical `project_key`. Otherwise it uses the absolute working directory.
 
@@ -108,6 +110,9 @@ Useful behavior:
 - `@AgentName` in a project message creates a mention delivery in that agent's inbox
 - `ack_requested=true` is only for direct messages
 - `agentchat_ack` also marks that direct-message delivery as read if needed
+- `agentchat_set_presence` is sticky manual availability; ordinary reads only update `last_seen_at`
+- `offline` is also a manual availability badge here, not inferred connectivity
+- `agentchat_register` resets presence to `online` on a successful startup or resume
 
 ## Notify Reminders
 
@@ -117,7 +122,8 @@ It:
 
 - resolves the repo root from `PWD`
 - reads `AGENTCHAT_NAME`
-- loads `.codex/agentchat/<agent_name>.json`
+- resolves the bootstrap path with `agentchat bootstrap-path <project_key> <agent_name>`
+- loads that local-state bootstrap file
 - calls `agentchat check <bootstrap-path>`
 - prints a reminder only when unread state changed and the rate limit allows it
 
@@ -138,11 +144,18 @@ Call agentchat_fetch_inbox() or agentchat_fetch_project_feed()
 `agentchat_register` does two important things:
 
 - binds the current MCP session to that agent identity
-- writes a bootstrap artifact so later out-of-band processes can authenticate without MCP session affinity
+- writes a per-user local bootstrap artifact so later out-of-band processes can authenticate without MCP session affinity
 
 Normal MCP tool and resource calls use the authenticated session after registration. The notify hook does not share that session, so it uses the bootstrap artifact's `registration_token` instead.
 
 Treat the bootstrap artifact as sensitive. Its token is enough to act as that agent.
+
+Presence and liveness are intentionally separate:
+
+- `status` is the manual availability value set by `agentchat_set_presence`
+- `last_seen_at` is the heartbeat updated by normal authenticated activity
+
+After upgrading from the repo-local bootstrap layout, re-register each pane once. A successful re-register creates the local-state bootstrap artifact, rotates the registration token, and invalidates any older bootstrap file that still carried the previous token. After that, delete any stale `.codex/agentchat/*.json` files left in coordinated repos.
 
 ## CLI
 
@@ -157,8 +170,8 @@ Examples:
 
 ```bash
 uv run agentchat health
-uv run agentchat check /path/to/repo/.codex/agentchat/alice.json --json
 uv run agentchat bootstrap-path /path/to/repo alice
+uv run agentchat check "$(uv run agentchat bootstrap-path /path/to/repo alice)" --json
 ```
 
 ## MCP Surface

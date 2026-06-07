@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ import httpx
 import typer
 import uvicorn
 
+from .bootstrap import default_notify_state_path, resolve_bootstrap_path
 from .server import Settings, create_app
 
 app = typer.Typer(add_completion=False)
@@ -59,23 +61,40 @@ def state_fingerprint(check_result: dict[str, Any]) -> str:
     return hashlib.sha256(digest_input.encode("utf-8")).hexdigest()
 
 
+def load_notify_state(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+
+def write_notify_state(path: Path, fingerprint: str, at: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"fingerprint": fingerprint, "at": at}), encoding="utf-8")
+    with suppress(OSError):
+        os.chmod(path, 0o600)
+
+
+def resolve_notify_state_file(bootstrap: Path, state_file: Path | None) -> Path:
+    return state_file or default_notify_state_path(bootstrap)
+
+
 def should_emit_notification(
-    state_file: Path | None,
+    state_file: Path,
     fingerprint: str,
     min_interval_seconds: int,
+    now: int,
 ) -> bool:
-    if state_file is None:
-        return True
-    state_file.parent.mkdir(parents=True, exist_ok=True)
-    now = int(time.monotonic())
-    if state_file.exists():
-        try:
-            previous = json.loads(state_file.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            previous = {}
-        if previous.get("fingerprint") == fingerprint and (now - int(previous.get("at", 0))) < min_interval_seconds:
-            return False
-    state_file.write_text(json.dumps({"fingerprint": fingerprint, "at": now}), encoding="utf-8")
+    previous = load_notify_state(state_file)
+    try:
+        previous_at = int(previous.get("at", 0))
+    except (TypeError, ValueError):
+        previous_at = 0
+    if previous.get("fingerprint") == fingerprint and (now - previous_at) < min_interval_seconds:
+        return False
+    write_notify_state(state_file, fingerprint, now)
     return True
 
 
@@ -119,10 +138,15 @@ def check(
         typer.echo(json.dumps(result, indent=2, sort_keys=True))
         return
     if notify:
-        if result["total_unread"] <= 0:
-            return
+        notify_state_file = resolve_notify_state_file(bootstrap, state_file)
         fingerprint = state_fingerprint(result)
-        if should_emit_notification(state_file, fingerprint, min_interval_seconds):
+        now = int(time.time())
+        if result["total_unread"] <= 0:
+            # Persist the cleared fingerprint too, otherwise a 1 -> 0 -> 1
+            # cycle inside the rate-limit window gets suppressed incorrectly.
+            write_notify_state(notify_state_file, fingerprint, now)
+            return
+        if should_emit_notification(notify_state_file, fingerprint, min_interval_seconds, now):
             typer.echo(format_notify_message(result))
         return
     typer.echo(format_notify_message(result) if result["total_unread"] else "No unread messages.")
@@ -130,15 +154,7 @@ def check(
 
 @app.command()
 def bootstrap_path(project_key: str, agent_name: str) -> None:
-    from .server import bootstrap_path as compute_bootstrap_path
-    from .store import canonicalize_project_key, project_slug
-
-    canonical = canonicalize_project_key(project_key)
-    project_dir = Path(canonical)
-    path = compute_bootstrap_path(
-        type("ProjectStub", (), {"project_key": str(project_dir), "project_slug": project_slug(canonical)})(),
-        agent_name,
-    )
+    path = resolve_bootstrap_path(project_key, agent_name)
     typer.echo(str(path))
 
 

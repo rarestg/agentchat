@@ -111,6 +111,7 @@ Useful behavior:
 - `ack_requested=true` is only for direct messages
 - `agentchat_ack` also marks that direct-message delivery as read if needed
 - `agentchat_set_presence` is sticky manual availability; ordinary reads only update `last_seen_at`
+- `offline` is also a manual availability badge here, not inferred connectivity
 - `agentchat_register` resets presence to `online` on a successful startup or resume
 
 ## Notify Reminders
@@ -148,6 +149,11 @@ Call agentchat_fetch_inbox() or agentchat_fetch_project_feed()
 Normal MCP tool and resource calls use the authenticated session after registration. The notify hook does not share that session, so it uses the bootstrap artifact's `registration_token` instead.
 
 Treat the bootstrap artifact as sensitive. Its token is enough to act as that agent.
+
+Presence and liveness are intentionally separate:
+
+- `status` is the manual availability value set by `agentchat_set_presence`
+- `last_seen_at` is the heartbeat updated by normal authenticated activity
 
 After upgrading from the repo-local bootstrap layout, re-register each pane once. A successful re-register creates the local-state bootstrap artifact, rotates the registration token, and invalidates any older bootstrap file that still carried the previous token. After that, delete any stale `.codex/agentchat/*.json` files left in coordinated repos.
 

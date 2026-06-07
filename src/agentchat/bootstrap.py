@@ -39,6 +39,9 @@ def resolve_bootstrap_path(project_key: str, agent_name: str) -> Path:
     canonical_project_key = canonicalize_project_key(project_key)
     name = validate_agent_name(agent_name)
     path = bootstrap_state_root() / project_bootstrap_key(canonical_project_key) / f"{name}.json"
+    # The bootstrap file is local secret state, not project state. Reject any
+    # resolved path that loops back under the coordinated repo, even through
+    # symlinks or an explicitly chosen absolute XDG_STATE_HOME.
     real_bootstrap = Path(os.path.realpath(path))
     real_project = Path(os.path.realpath(canonical_project_key))
     if _path_is_within(real_bootstrap, real_project):
@@ -58,6 +61,9 @@ def _validate_managed_subtree(path: Path) -> None:
         raise ValueError("Bootstrap path must live under the configured state root.") from exc
 
     current = base
+    # Only the subtree under the configured state root is ours to create. Any
+    # existing symlink or non-directory component in that managed path is a hard
+    # refusal so we do not follow attacker-controlled redirects.
     for part in relative.parts[:-1]:
         current = current / part
         if current.exists():

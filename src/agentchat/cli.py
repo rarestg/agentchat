@@ -142,6 +142,8 @@ def check(
         fingerprint = state_fingerprint(result)
         now = int(time.time())
         if result["total_unread"] <= 0:
+            # Persist the cleared fingerprint too, otherwise a 1 -> 0 -> 1
+            # cycle inside the rate-limit window gets suppressed incorrectly.
             write_notify_state(notify_state_file, fingerprint, now)
             return
         if should_emit_notification(notify_state_file, fingerprint, min_interval_seconds, now):

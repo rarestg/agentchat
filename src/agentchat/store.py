@@ -308,7 +308,7 @@ class Store:
             status=str(row["status"]),
         )
 
-    def register_agent(
+    def create_agent(
         self,
         project: Project,
         agent_name: str,
@@ -328,23 +328,10 @@ class Store:
                 (project.id, name),
             ).fetchone()
             if existing is not None:
-                stored = str(existing["registration_token"])
-                if not registration_token or not hmac.compare_digest(stored, registration_token):
-                    raise ValueError(
-                        f"Active agent_name '{name}' already exists for this project. "
-                        "Pass the existing registration_token to refresh it."
-                    )
-                token = stored
-                now = utc_now()
-                conn.execute(
-                    """
-                    UPDATE agents
-                    SET program = ?, model = ?, session_id = ?, last_seen_at = ?, status = ?
-                    WHERE id = ?
-                    """,
-                    (program, model, session_id, now, STATUS_ONLINE, int(existing["id"])),
+                raise ValueError(
+                    f"Active agent_name '{name}' already exists for this project. "
+                    "Pass the existing registration_token to refresh it."
                 )
-                return self.get_agent_by_id(int(existing["id"]))
 
             token = registration_token or secrets.token_urlsafe(24)
             now = utc_now()
@@ -361,18 +348,78 @@ class Store:
             assert agent is not None
             return agent
 
-    def touch_agent(self, agent_id: int, session_id: str | None = None, status: str = STATUS_ONLINE) -> None:
+    def refresh_agent_registration(
+        self,
+        project: Project,
+        agent_name: str,
+        program: str,
+        model: str,
+        session_id: str | None,
+        registration_token: str | None,
+    ) -> tuple[Agent, Agent]:
+        name = validate_agent_name(agent_name)
+        existing = self.get_agent(project.id, name)
+        if existing is None:
+            raise ValueError(f"Unknown agent: {name}")
+        if not registration_token or not hmac.compare_digest(existing.registration_token, registration_token):
+            raise ValueError(
+                f"Active agent_name '{name}' already exists for this project. "
+                "Pass the existing registration_token to refresh it."
+            )
+        new_token = secrets.token_urlsafe(24)
+        now = utc_now()
+        # Best-effort rotation only: the DB must move first so the new bootstrap can be
+        # written with the token that is actually authoritative. A hard crash between this
+        # update and the bootstrap-file replace cannot be rolled back automatically.
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE agents
+                SET program = ?, model = ?, registration_token = ?, session_id = ?, last_seen_at = ?, status = ?
+                WHERE id = ?
+                """,
+                (program, model, new_token, session_id, now, STATUS_ONLINE, existing.id),
+            )
+        return existing, self.get_agent_by_id(existing.id)
+
+    def delete_agent(self, agent_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM agents WHERE id = ?", (agent_id,))
+
+    def restore_agent(self, snapshot: Agent) -> Agent:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE agents
+                SET program = ?, model = ?, registration_token = ?, session_id = ?,
+                    started_at = ?, last_seen_at = ?, status = ?
+                WHERE id = ?
+                """,
+                (
+                    snapshot.program,
+                    snapshot.model,
+                    snapshot.registration_token,
+                    snapshot.session_id,
+                    snapshot.started_at,
+                    snapshot.last_seen_at,
+                    snapshot.status,
+                    snapshot.id,
+                ),
+            )
+        return self.get_agent_by_id(snapshot.id)
+
+    def touch_agent(self, agent_id: int, session_id: str | None = None) -> None:
         now = utc_now()
         with self._connect() as conn:
             if session_id is None:
                 conn.execute(
-                    "UPDATE agents SET last_seen_at = ?, status = ? WHERE id = ?",
-                    (now, status, agent_id),
+                    "UPDATE agents SET last_seen_at = ? WHERE id = ?",
+                    (now, agent_id),
                 )
             else:
                 conn.execute(
-                    "UPDATE agents SET last_seen_at = ?, session_id = ?, status = ? WHERE id = ?",
-                    (now, session_id, status, agent_id),
+                    "UPDATE agents SET last_seen_at = ?, session_id = ? WHERE id = ?",
+                    (now, session_id, agent_id),
                 )
 
     def set_presence(self, project: Project, agent_name: str, status: str) -> Agent:
